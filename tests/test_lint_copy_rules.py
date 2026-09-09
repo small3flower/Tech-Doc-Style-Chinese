@@ -64,6 +64,59 @@ class CopyLintRulesTest(unittest.TestCase):
         findings = self.scan("阀值 <!-- copy-lint-disable-line -->")
         self.assertEqual(findings, [])
 
+    def test_url_followed_by_chinese_punctuation_keeps_prose(self):
+        for punctuation in "。；，！？）」":
+            with self.subTest(punctuation=punctuation):
+                text = f"参见 https://example.com{punctuation}阀值需要调整。"
+                findings = self.scan(text)
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0].kind, "typo")
+                self.assertEqual(findings[0].col, text.index("阀值") + 1)
+
+    def test_explicit_links_keep_punctuation_inside_destination(self):
+        for text in (
+            "[说明](https://example.com/中文，阀值)",
+            "<https://example.com/中文，阀值>",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.scan(text), [])
+
+    def test_quoted_fences_protect_code_but_not_following_prose(self):
+        for prefix in ("> ", "> > "):
+            text = "\n".join(prefix + line for line in (
+                "```text", '阀值 = "api"', "```", "阀值需要调整。"
+            ))
+            findings = self.scan(text)
+            self.assertEqual([(v.line, v.kind) for v in findings], [(4, "typo")])
+
+    def test_unclosed_quote_fence_does_not_hide_outside_prose(self):
+        findings = self.scan("> ```text\n> 阀值\n\n阀值需要调整。")
+        self.assertEqual([(v.line, v.kind) for v in findings], [(4, "typo")])
+
+    def test_indented_code_and_paragraph_continuation(self):
+        for indent in ("    ", "\t", ">     "):
+            with self.subTest(indent=indent):
+                findings = self.scan(f'{indent}阀值 = "api"\n\n阀值需要调整。')
+                self.assertEqual([(v.line, v.kind) for v in findings], [(3, "typo")])
+        findings = self.scan("普通段落\n    阀值需要调整。")
+        self.assertEqual([(v.line, v.kind) for v in findings], [(2, "typo")])
+
+    def test_fence_like_code_line_does_not_close_fence(self):
+        findings = self.scan("```text\n```not-a-close\n阀值\n```\n阀值")
+        self.assertEqual([(v.line, v.kind) for v in findings], [(5, "typo")])
+
+    def test_html_attributes_are_hidden_but_text_is_checked(self):
+        for text in (
+            '<a id="api" title="阀值 > 0">阀值</a>',
+            '<a\n id="api"\n title="阀值 > 0">阀值</a>',
+        ):
+            with self.subTest(text=text):
+                findings = self.scan(text)
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0].kind, "typo")
+                last_line = text.splitlines()[-1]
+                self.assertEqual(findings[0].col, last_line.rindex("阀值") + 1)
+
     def test_context_warning_does_not_fail_default_cli(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.md"

@@ -22,9 +22,14 @@ DEFAULT_TARGETS = ["."]
 INLINE_IGNORE_MARKER = "<!-- copy-lint-disable-line -->"
 SKIP_DIR_NAMES = {".git", ".venv", "node_modules", "vendor"}
 
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+QUOTE_PREFIX_RE = re.compile(r"^ {0,3}>[ \t]?")
+HTML_TAG_RE = re.compile(
+    r'''</?[A-Za-z][A-Za-z0-9:-]*(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>'''
+)
+AUTOLINK_RE = re.compile(r"<https?://[^<>\s]+>")
 INLINE_CODE_RE = re.compile(r"(`+)(.*?)\1")
-URL_RE = re.compile(r"https?://\S+")
+URL_RE = re.compile(r'''https?://[^\s<>"'，。；：！？、（）「」『』【】]+''')
 API_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])/[A-Za-z0-9._~%-]+"
     r"(?:/[A-Za-z0-9._~%-]+)*(?:\?[^\s)]*)?(?![A-Za-z0-9_])"
@@ -134,6 +139,7 @@ def mask_match(text: str, regex: re.Pattern[str]) -> str:
 
 def prepare_visible_line(line: str) -> str:
     visible = mask_match(line, INLINE_CODE_RE)
+    visible = mask_match(visible, AUTOLINK_RE)
     visible = INLINE_LINK_RE.sub(
         lambda match: (
             f"{match.group(1)}{' ' * len(match.group(2))}{match.group(3)}"
@@ -186,30 +192,70 @@ def add_rule_matches(
 def scan_markdown(path: Path) -> list[Violation]:
     violations: list[Violation] = []
     fence_delimiter: str | None = None
-    lines = path.read_text(encoding="utf-8").splitlines()
+    source = path.read_text(encoding="utf-8")
+    raw_lines = source.splitlines()
+    # Preserve line/column positions, including multiline HTML attributes.
+    source = HTML_TAG_RE.sub(
+        lambda match: re.sub(r"[^\r\n]", " ", match.group()), source
+    )
+    lines = source.splitlines()
     in_front_matter = bool(lines and lines[0].strip() == "---")
+    previous_depth = 0
+    paragraph_open = False
+    indented_code = False
 
-    for line_no, raw in enumerate(lines, start=1):
+    for line_no, content in enumerate(lines, start=1):
+        raw = raw_lines[line_no - 1]
+        # HTML masking must not turn a tag into apparent code indentation.
+        content = raw
         if in_front_matter:
             if line_no != 1 and raw.strip() in {"---", "..."}:
                 in_front_matter = False
             continue
 
-        fence_match = FENCE_RE.match(raw)
-        if fence_match:
-            delimiter = fence_match.group(1)
-            if fence_delimiter is None:
-                fence_delimiter = delimiter
-            elif delimiter[0] == fence_delimiter[0] and len(delimiter) >= len(
-                fence_delimiter
+        depth = 0
+        while prefix := QUOTE_PREFIX_RE.match(content):
+            content = content[prefix.end():]
+            depth += 1
+        if depth != previous_depth:
+            fence_delimiter = None
+            paragraph_open = False
+            indented_code = False
+        previous_depth = depth
+
+        fence_match = FENCE_RE.match(content)
+        if fence_delimiter is not None:
+            if (
+                fence_match
+                and fence_match.group(1)[0] == fence_delimiter[0]
+                and len(fence_match.group(1)) >= len(fence_delimiter)
+                and not fence_match.group(2).strip()
             ):
                 fence_delimiter = None
             continue
 
-        if fence_delimiter is not None or INLINE_IGNORE_MARKER in raw:
+        if not content.strip():
+            paragraph_open = False
+            continue
+        if content.startswith(("    ", "\t")) and (
+            indented_code or not paragraph_open
+        ):
+            indented_code = True
+            continue
+        indented_code = False
+
+        if fence_match:
+            delimiter = fence_match.group(1)
+            if delimiter[0] != "`" or "`" not in fence_match.group(2):
+                fence_delimiter = delimiter
+                paragraph_open = False
+                continue
+
+        paragraph_open = True
+        if INLINE_IGNORE_MARKER in raw:
             continue
 
-        visible = prepare_visible_line(raw)
+        visible = prepare_visible_line(lines[line_no - 1])
 
         for quote, label in FORBIDDEN_QUOTES.items():
             for match in re.finditer(re.escape(quote), visible):
