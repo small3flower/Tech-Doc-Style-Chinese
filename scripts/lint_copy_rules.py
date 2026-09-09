@@ -24,6 +24,7 @@ SKIP_DIR_NAMES = {".git", ".venv", "node_modules", "vendor"}
 
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 QUOTE_PREFIX_RE = re.compile(r"^ {0,3}>[ \t]?")
+LIST_ITEM_RE = re.compile(r"^( *)(?:[-+*]|\d{1,9}[.)])([ \t]+)(.*)$")
 HTML_TAG_RE = re.compile(
     r'''</?[A-Za-z][A-Za-z0-9:-]*(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>'''
 )
@@ -203,6 +204,9 @@ def scan_markdown(path: Path) -> list[Violation]:
     previous_depth = 0
     paragraph_open = False
     indented_code = False
+    list_indents: list[int] = []
+    fence_depth = 0
+    fence_indent = 0
 
     for line_no, content in enumerate(lines, start=1):
         raw = raw_lines[line_no - 1]
@@ -213,30 +217,68 @@ def scan_markdown(path: Path) -> list[Violation]:
                 in_front_matter = False
             continue
 
+        # Only consume the containers recorded at the opening fence. Symbols
+        # inside code (including > and list markers) are literal content.
+        if fence_delimiter is not None:
+            candidate = raw.expandtabs(4)
+            container_present = True
+            for _ in range(fence_depth):
+                prefix = QUOTE_PREFIX_RE.match(candidate)
+                if prefix is None:
+                    container_present = False
+                    break
+                candidate = candidate[prefix.end():]
+            if container_present and fence_indent:
+                if candidate.strip() and not candidate.startswith(" " * fence_indent):
+                    container_present = False
+                else:
+                    candidate = candidate[fence_indent:]
+            if container_present:
+                closing = FENCE_RE.match(candidate)
+                if (
+                    closing
+                    and closing.group(1)[0] == fence_delimiter[0]
+                    and len(closing.group(1)) >= len(fence_delimiter)
+                    and not closing.group(2).strip()
+                ):
+                    fence_delimiter = None
+                continue
+            fence_delimiter = None
+
+        content = raw.expandtabs(4)
         depth = 0
         while prefix := QUOTE_PREFIX_RE.match(content):
             content = content[prefix.end():]
             depth += 1
         if depth != previous_depth:
-            fence_delimiter = None
             paragraph_open = False
             indented_code = False
+            list_indents.clear()
         previous_depth = depth
-
-        fence_match = FENCE_RE.match(content)
-        if fence_delimiter is not None:
-            if (
-                fence_match
-                and fence_match.group(1)[0] == fence_delimiter[0]
-                and len(fence_match.group(1)) >= len(fence_delimiter)
-                and not fence_match.group(2).strip()
-            ):
-                fence_delimiter = None
-            continue
 
         if not content.strip():
             paragraph_open = False
             continue
+        indentation = len(content) - len(content.lstrip(" "))
+        while list_indents and indentation < list_indents[-1]:
+            list_indents.pop()
+            paragraph_open = False
+            indented_code = False
+        container_indent = list_indents[-1] if list_indents else 0
+        content = content[container_indent:]
+        item = LIST_ITEM_RE.match(content)
+        if item and len(item.group(1)) <= 3:
+            # Up to four padding spaces belong to a list marker. Greater
+            # padding leaves indentation that can start an indented code block.
+            padding = len(item.group(2))
+            marker_width = item.start(3) - (padding - 1 if padding > 4 else 0)
+            container_indent += marker_width
+            list_indents.append(container_indent)
+            content = content[marker_width:]
+            paragraph_open = False
+            indented_code = False
+
+        fence_match = FENCE_RE.match(content)
         if content.startswith(("    ", "\t")) and (
             indented_code or not paragraph_open
         ):
@@ -248,6 +290,8 @@ def scan_markdown(path: Path) -> list[Violation]:
             delimiter = fence_match.group(1)
             if delimiter[0] != "`" or "`" not in fence_match.group(2):
                 fence_delimiter = delimiter
+                fence_depth = depth
+                fence_indent = container_indent
                 paragraph_open = False
                 continue
 

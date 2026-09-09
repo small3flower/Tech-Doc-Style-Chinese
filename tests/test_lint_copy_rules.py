@@ -64,6 +64,46 @@ class CopyLintRulesTest(unittest.TestCase):
         findings = self.scan("阀值 <!-- copy-lint-disable-line -->")
         self.assertEqual(findings, [])
 
+    def test_fence_content_does_not_change_containers(self):
+        for prefix in ("", "> "):
+            for delimiter in ("```", "~~~"):
+                with self.subTest(prefix=prefix, delimiter=delimiter):
+                    text = "\n".join(prefix + line for line in (
+                        delimiter + "text", "> 阀值", "- 阀值",
+                        delimiter, "阀值需要调整。",
+                    ))
+                    findings = self.scan(text)
+                    self.assertEqual([(v.line, v.kind) for v in findings], [(5, "typo")])
+
+    def test_list_fences_preserve_following_list_prose(self):
+        for marker, indent in (("- ", "    "), ("1. ", "    "), ("-   ", "    ")):
+            for prefix in ("", "> "):
+                with self.subTest(marker=marker, prefix=prefix):
+                    text = "\n".join(prefix + line for line in (
+                        marker + "示例：", "", indent + "```text",
+                        indent + "> 阀值", indent + "```", "",
+                        indent + "阀值需要调整。",
+                    ))
+                    findings = self.scan(text)
+                    self.assertEqual([(v.line, v.kind) for v in findings], [(7, "typo")])
+                    self.assertEqual(findings[0].col, len(prefix + indent) + 1)
+
+    def test_nested_list_and_indented_code(self):
+        text = "\n".join((
+            "- 外层", "  - 内层", "", "        阀值 = 1", "",
+            "    阀值需要调整。", "", "阀值需要调整。",
+        ))
+        findings = self.scan(text)
+        self.assertEqual([(v.line, v.kind) for v in findings], [(6, "typo"), (8, "typo")])
+
+    def test_list_fence_on_marker_line_and_container_exit(self):
+        for text, expected in (
+            ("- ```text\n  > 阀值\n  ```\n\n阀值", 5),
+            ("- ```text\n  阀值\n\n阀值", 4),
+        ):
+            findings = self.scan(text)
+            self.assertEqual([(v.line, v.kind) for v in findings], [(expected, "typo")])
+
     def test_url_followed_by_chinese_punctuation_keeps_prose(self):
         for punctuation in "。；，！？）」":
             with self.subTest(punctuation=punctuation):
