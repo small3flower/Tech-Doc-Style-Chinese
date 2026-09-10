@@ -13,6 +13,10 @@ SCRIPT = ROOT / "scripts" / "unwrap_md_paragraphs.py"
 UNWRAPPER = runpy.run_path(str(SCRIPT), run_name="unwrap_md_paragraphs_test")
 unwrap_text = UNWRAPPER["unwrap_text"]
 joiner = UNWRAPPER["joiner"]
+scan_structure = UNWRAPPER["scan_structure"]
+has_file_ignore_marker = UNWRAPPER["has_file_ignore_marker"]
+process_file = UNWRAPPER["process_file"]
+KIND_VERBATIM = UNWRAPPER["KIND_VERBATIM"]
 
 
 class JoinSpacingTest(unittest.TestCase):
@@ -135,6 +139,107 @@ class UnwrapParagraphTest(unittest.TestCase):
         text = "- 步骤说明。\n\n      indented code\n      stays as is\n"
         self.assertEqual(self.unwrap(text), text)
 
+    def test_keeps_fence_opened_on_list_marker_line(self):
+        text = "- ```sh\n  echo first\n  echo second\n  ```\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_tilde_fence_opened_on_list_marker_line(self):
+        text = "- ~~~sh\n  echo first\n  echo second\n  ~~~\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_fence_opened_on_ordered_list_marker_line(self):
+        text = "1. ```py\n   print(1)\n   print(2)\n   ```\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_fence_indented_at_item_content_column(self):
+        text = "- 说明\n\n  ```sh\n  echo first\n  echo second\n  ```\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_closing_fence_indented_within_slack(self):
+        text = "- ```sh\n  echo first\n    ```\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_unwraps_paragraph_after_list_fence_block(self):
+        text = "- ```sh\n  echo first\n  ```\n\n段落第一行\n段落第二行\n"
+        unwrapped, joins = unwrap_text(text)
+        self.assertEqual(
+            unwrapped,
+            "- ```sh\n  echo first\n  ```\n\n段落第一行段落第二行\n",
+        )
+        self.assertEqual([(item[0], item[1]) for item in joins], [(5, 1)])
+
+    def test_closing_fence_requires_only_fence_characters(self):
+        text = "```\ncode\n```python\n文本一\n文本二\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_inline_code_span_does_not_open_fence(self):
+        text = "```code``` 表示行内\n代码写法。\n"
+        self.assertEqual(self.unwrap(text), "```code``` 表示行内代码写法。\n")
+
+    def test_keeps_indented_code_that_looks_like_list(self):
+        text = "示例：\n\n    - first\n    second\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_indented_code_after_list_ends(self):
+        text = "- 项目\n\n结束。\n\n    echo first\n    echo second\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_indented_code_after_heading_ends_list(self):
+        text = "- 项目说明\n# 标题\n\n    echo first\n    echo second\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_indented_code_across_blank_lines(self):
+        text = "说明：\n\n    echo first\n\n    echo second\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_tab_indented_code_block(self):
+        text = "说明：\n\n\t制表符代码\n\t第二行\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_multiline_pre_block(self):
+        text = "<pre>\nfirst\nsecond\n</pre>\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_pre_block_containing_blank_line(self):
+        text = "<pre>\nfirst\n\nsecond\n</pre>\n\n段落一\n段落二\n"
+        self.assertEqual(
+            self.unwrap(text),
+            "<pre>\nfirst\n\nsecond\n</pre>\n\n段落一段落二\n",
+        )
+
+    def test_keeps_pre_block_opened_on_list_marker_line(self):
+        text = "- <pre>\n  first\n  second\n  </pre>\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_keeps_multiline_html_block(self):
+        text = "<div>\n第一行\n第二行\n</div>\n"
+        self.assertEqual(self.unwrap(text), text)
+
+    def test_html_block_ends_at_blank_line(self):
+        text = "<div>\n第一行\n</div>\n\n段落一\n段落二\n"
+        self.assertEqual(
+            self.unwrap(text), "<div>\n第一行\n</div>\n\n段落一段落二\n"
+        )
+
+    def test_keeps_multiline_html_comment(self):
+        text = "<!-- 注释第一行\n注释第二行 -->\n\n段落一\n段落二\n"
+        self.assertEqual(
+            self.unwrap(text), "<!-- 注释第一行\n注释第二行 -->\n\n段落一段落二\n"
+        )
+
+    def test_autolink_line_does_not_open_html_block(self):
+        text = "<https://example.com>\n后续段落一\n后续段落二\n"
+        self.assertEqual(
+            self.unwrap(text), "<https://example.com>\n后续段落一后续段落二\n"
+        )
+
+    def test_scan_marks_list_fence_lines_verbatim(self):
+        scan = scan_structure("- ```sh\n  echo first\n  ```\n")
+        self.assertEqual(
+            [item.kind for item in scan.lines],
+            [KIND_VERBATIM, KIND_VERBATIM, KIND_VERBATIM],
+        )
+
     def test_keeps_explicit_hard_break(self):
         text = "本项目采用 MIT License。  \n详见 LICENSE。\n"
         self.assertEqual(self.unwrap(text), text)
@@ -160,6 +265,52 @@ class UnwrapParagraphTest(unittest.TestCase):
             unwrapped, joins = UNWRAPPER["process_file"](path)
             self.assertEqual(unwrapped, text)
             self.assertEqual(joins, [])
+
+
+class IgnoreMarkerScopeTest(unittest.TestCase):
+    """跳过标记只在代码块和 HTML 块之外独立成行时生效。"""
+
+    def test_standalone_marker_returns_text_unchanged(self):
+        text = "<!-- unwrap-disable-file -->\n\n第一行\n第二行\n"
+        self.assertTrue(has_file_ignore_marker(text))
+        self.assertEqual(unwrap_text(text), (text, []))
+
+    def test_marker_inside_fenced_example_does_not_skip_file(self):
+        text = "````markdown\n<!-- unwrap-disable-file -->\n````\n\n第一行\n第二行\n"
+        self.assertFalse(has_file_ignore_marker(text))
+        unwrapped, joins = unwrap_text(text)
+        self.assertEqual(
+            unwrapped, "````markdown\n<!-- unwrap-disable-file -->\n````\n\n第一行第二行\n"
+        )
+        self.assertEqual(len(joins), 1)
+
+    def test_marker_appended_to_text_does_not_skip_file(self):
+        self.assertFalse(
+            has_file_ignore_marker("正文 <!-- unwrap-disable-file -->\n第二行\n")
+        )
+
+    def test_marker_inside_indented_code_does_not_skip_file(self):
+        text = "说明：\n\n    <!-- unwrap-disable-file -->\n\n第一行\n第二行\n"
+        self.assertFalse(has_file_ignore_marker(text))
+
+    def test_marker_inside_html_block_does_not_skip_file(self):
+        text = "<pre>\n<!-- unwrap-disable-file -->\n</pre>\n\n第一行\n第二行\n"
+        self.assertFalse(has_file_ignore_marker(text))
+
+    def test_process_file_agrees_with_unwrap_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.md"
+            path.write_text(
+                "```markdown\n<!-- unwrap-disable-file -->\n```\n\n第一行\n第二行\n",
+                encoding="utf-8",
+            )
+            _, joins = process_file(path)
+            self.assertEqual(len(joins), 1)
+
+    def test_readme_is_not_exempt_from_check(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("<!-- unwrap-disable-file -->", readme)
+        self.assertFalse(has_file_ignore_marker(readme))
 
 
 class UnwrapCliTest(unittest.TestCase):
